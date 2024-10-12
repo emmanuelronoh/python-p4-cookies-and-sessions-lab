@@ -1,57 +1,80 @@
+import pytest
 import flask
+from app import app, db, Article, User
 
-from app import app
-app.secret_key = b'a\xdb\xd2\x13\x93\xc1\xe9\x97\xef2\xe3\x004U\xd1Z'
+@pytest.fixture(scope='module')
+def test_client():
+    app.config['TESTING'] = True
+    app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///test.db'
+    
+    with app.app_context():
+        db.create_all()  
+        test_user = User(name='Test User')
+        db.session.add(test_user)
+        db.session.commit()
+        yield app.test_client()
+        db.drop_all()
 
-class TestApp:
-    '''Flask API in app.py'''
+@pytest.fixture
+def setup_articles(test_client):
+    with app.app_context():
+        user_id = User.query.first().id  
+        articles = [
+            Article(author='Author 1', title='Title 1', content='Content 1', preview='Preview 1', minutes_to_read=5, user_id=user_id),
+            Article(author='Author 2', title='Title 2', content='Content 2', preview='Preview 2', minutes_to_read=10, user_id=user_id),
+            Article(author='Author 3', title='Title 3', content='Content 3', preview='Preview 3', minutes_to_read=15, user_id=user_id)
+        ]
+        db.session.add_all(articles)
+        db.session.commit()
 
-    def test_show_articles_route(self):
-        '''shows an article "/article/<id>".'''
-        with app.app_context():
-            response = app.test_client().get('/articles/1')
-            response_json = response.get_json()
+def test_show_articles_route(test_client, setup_articles):
+    response = test_client.get('/articles/1')
+    response_json = response.get_json()
+    
+    assert response_json.get('author') is not None
+    assert response_json.get('title') is not None
+    assert response_json.get('content') is not None
+    assert response_json.get('preview') is not None
+    assert response_json.get('minutes_to_read') is not None
+    assert response_json.get('date') is not None
 
-            assert(response_json.get('author'))
-            assert(response_json.get('title'))
-            assert(response_json.get('content'))
-            assert(response_json.get('preview'))
-            assert(response_json.get('minutes_to_read'))
-            assert(response_json.get('date'))
+def test_increments_session_page_views(test_client):
+    with test_client as client:
+        client.post('/clear')  
 
-    def test_increments_session_page_views(self):
-        '''increases session['page_views'] by 1 after every viewed article.'''
-        with app.test_client() as client:
+        # View first article
+        response = client.get('/articles/1')
+        assert response.status_code == 200
+        assert flask.session.get('page_views') == 1
 
-            client.get('/articles/1')
-            assert(flask.session.get('page_views') == 1)
+        # View second article
+        response = client.get('/articles/2')
+        assert response.status_code == 200
+        assert flask.session.get('page_views') == 2
 
-            client.get('/articles/2')
-            assert(flask.session.get('page_views') == 2)
+        # View third article
+        response = client.get('/articles/3')
+        assert response.status_code == 200
+        assert flask.session.get('page_views') == 3
 
-            client.get('/articles/3')
-            assert(flask.session.get('page_views') == 3)
+        # Attempt to view a fourth article (should trigger the limit)
+        response = client.get('/articles/1')  # This should trigger the limit check
+        assert response.status_code == 401
+        assert response.get_json().get('message') == 'Maximum pageview limit reached'
 
-            client.get('/articles/3')
-            assert(flask.session.get('page_views') == 4)
+def test_limits_three_articles(test_client, setup_articles):
+    with test_client as client:
+        client.post('/clear')  
 
-    def test_limits_three_articles(self):
-        '''returns a 401 with an error message after 3 viewed articles.'''
-        with app.app_context():
+        response = client.get('/articles/1')
+        assert response.status_code == 200
+        
+        response = client.get('/articles/2')
+        assert response.status_code == 200
 
-            client = app.test_client()
+        response = client.get('/articles/3')
+        assert response.status_code == 200
 
-            response = client.get('/articles/1')
-            assert(response.status_code == 200)
-            
-            response = client.get('/articles/2')
-            assert(response.status_code == 200)
-
-            response = client.get('/articles/3')
-            assert(response.status_code == 200)
-
-            response = client.get('/articles/4')
-            assert(response.status_code == 401)
-            assert(response.get_json().get('message') == 
-                'Maximum pageview limit reached')
-
+        response = client.get('/articles/1')  # This should trigger the limit check
+        assert response.status_code == 401
+        assert response.get_json().get('message') == 'Maximum pageview limit reached'
